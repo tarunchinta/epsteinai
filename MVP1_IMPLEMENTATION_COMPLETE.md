@@ -139,7 +139,7 @@ Example queries successfully found relevant documents:
 
 ### MVP 2: Metadata Extraction (Future)
 - Extract named entities (people, locations, dates)
-- Store metadata in SQLite
+- Store metadata in sqlite
 - Filter search results by entities
 - Query like: "documents mentioning Maxwell in 2019"
 
