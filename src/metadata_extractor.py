@@ -35,12 +35,54 @@ class MetadataExtractor:
         
         # Validation patterns for entity quality filtering
         self.invalid_patterns = [
-            r'[{}\[\]<>]',          # JSON/HTML brackets
-            r'^\d{2}-\d{2}-\d{4}',  # Dates (already extracted separately)
-            r'^[%&@#$]+',           # Special char prefixes
-            r'^\d+\s*$',            # Pure numbers
-            r'textStyle|layout|identifier',  # JSON keys
+            # JSON/HTML/XML
+            r'[{}\[\]<>]',                      # JSON/HTML brackets
+            r'&[a-z]+;',                        # HTML entities (&lt;, &gt;, &nbsp;, etc.)
+            r'</?\w+',                          # HTML tags
+            r'href=|target=|class=|style=',     # HTML attributes
+            
+            # Dates and times (extracted separately)
+            r'^\d{2}-\d{2}-\d{4}',              # Dates
+            r'^\d{4}-\d{2}-\d{2}',              # ISO dates
+            r'^\w{3}$',                         # 3-letter words (Mon, Tue, Fri, etc.)
+            
+            # Special characters
+            r'^[%&@#$]+',                       # Special char prefixes
+            r'^\d+\s*$',                        # Pure numbers
+            r'[|\\~`]',                         # Pipes, backslash, tilde, backtick
+            
+            # Email-related
+            r'@\w+\.(com|org|net|edu)',         # Email addresses
+            r'mailto:',                         # Email protocol
+            r'\[mailto:',                       # Email in brackets
+            
+            # Email headers
+            r'^(Sender|Subject|From|To):',      # Email header keywords
+            r'\b(Sent|Unauthorized)$',          # Email suffixes
+            
+            # Programming/Technical artifacts
+            r'textStyle|layout|identifier',     # JSON keys
+            r'HASH\(0x',                        # Perl hash references
+            r'Default\w+Name',                  # Default object names
+            
+            # Encoding issues
+            r'=\d{2}',                          # Encoded chars (=20, =3D)
+            r'3D""',                            # Encoded quotes
+            r'Â©|â€™',                          # Bad Unicode encoding
+            
+            # URLs
+            r'https?://',                       # URLs
+            r'www\.',                           # Web addresses
         ]
+        
+        # Exact words to reject (case-insensitive)
+        self.reject_exact_words = {
+            'sender', 'subject', 'from', 'to', 'sent', 'unauthorized',
+            'fri', 'mon', 'tue', 'wed', 'thu', 'sat', 'sun',  # Days
+            'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',  # Months
+            'twitter', 'facebook', 'instagram',  # Social media (not people)
+            'brexit',  # Events, not people
+        }
         
         # Minimum quality thresholds
         self.min_name_length = 3
@@ -114,6 +156,10 @@ class MetadataExtractor:
         if len(text) < self.min_name_length:
             return False
         if len(text) > self.max_name_length:
+            return False
+        
+        # Check exact reject words (case-insensitive)
+        if text.lower() in self.reject_exact_words:
             return False
         
         # Invalid pattern checks

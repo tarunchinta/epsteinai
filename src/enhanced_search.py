@@ -106,6 +106,55 @@ class EnhancedSearchEngine:
         self.entity_matcher = EntityMatcher()
         self.metadata_scorer = MetadataScorer()
         
+        # Build entity lookup index for fast query enhancement
+        logger.info("Building entity lookup index...")
+        self._build_entity_lookup()
+        logger.info(f"Entity lookup ready: {len(self.entity_lookup['people'])} people, "
+                   f"{len(self.entity_lookup['locations'])} locations, "
+                   f"{len(self.entity_lookup['organizations'])} orgs")
+    
+    def _build_entity_lookup(self):
+        """
+        Build fast lookup index for entity matching
+        
+        Creates normalized entity lookups to enable matching of:
+        - "epstein" → "Jeffrey Epstein"
+        - "maxwell" → "Ghislaine Maxwell"
+        - "ny" → "New York"
+        
+        This enables query enhancement even when spaCy NER fails.
+        """
+        entities = self.metadata_store.get_all_entities()
+        
+        # Create normalized entity lookup
+        # Maps: normalized_form → [canonical_forms]
+        self.entity_lookup = {
+            'people': {},
+            'locations': {},
+            'organizations': {}
+        }
+        
+        # Build lookup for people
+        for person in entities['people']:
+            normalized = self.entity_matcher.normalize_name(person)
+            if normalized not in self.entity_lookup['people']:
+                self.entity_lookup['people'][normalized] = []
+            self.entity_lookup['people'][normalized].append(person)
+        
+        # Build lookup for locations
+        for loc in entities['locations']:
+            normalized = self.entity_matcher.normalize_name(loc)
+            if normalized not in self.entity_lookup['locations']:
+                self.entity_lookup['locations'][normalized] = []
+            self.entity_lookup['locations'][normalized].append(loc)
+        
+        # Build lookup for organizations
+        for org in entities['organizations']:
+            normalized = self.entity_matcher.normalize_name(org)
+            if normalized not in self.entity_lookup['organizations']:
+                self.entity_lookup['organizations'][normalized] = []
+            self.entity_lookup['organizations'][normalized].append(org)
+        
     def search(self,
                query: str,
                top_k: int = 10,
@@ -237,13 +286,104 @@ class EnhancedSearchEngine:
         return filtered[:top_k]
     
     def _extract_query_entities(self, query: str) -> Dict:
-        """Extract entities from query with validation"""
+        """
+        Extract entities from query using multiple strategies:
+        1. spaCy NER (for properly capitalized names)
+        2. Known entity lookup (for lowercase/partial matches)
+        3. Substring matching (for partial entity names)
+        
+        This enables queries like "epstein investigation" to match "Jeffrey Epstein"
+        even when spaCy doesn't recognize "epstein" as a PERSON.
+        
+        Args:
+            query: User query string
+            
+        Returns:
+            Dict with 'people', 'locations', 'organizations' lists (or None)
+        """
+        # Strategy 1: Use spaCy NER (works for properly formatted names)
         metadata = self.metadata_extractor.extract_metadata(query, "query")
         
+        people = set(metadata['people']) if metadata['people'] else set()
+        locations = set(metadata['locations']) if metadata['locations'] else set()
+        organizations = set(metadata['organizations']) if metadata['organizations'] else set()
+        
+        logger.debug(f"spaCy NER found: people={people}, locations={locations}, orgs={organizations}")
+        
+        # Strategy 2: Check query tokens against known entities (exact normalized match)
+        query_tokens = query.lower().split()
+        stopwords = {'the', 'and', 'for', 'with', 'in', 'on', 'at', 'to', 'from', 'by', 'about', 'investigation', 'case', 'documents', 'files'}
+        
+        for token in query_tokens:
+            # Skip short tokens and stopwords
+            if len(token) < 3 or token in stopwords:
+                continue
+            
+            # Normalize token (remove punctuation, etc.)
+            normalized = self.entity_matcher.normalize_name(token)
+            
+            # Check against known entities (exact normalized match)
+            if normalized in self.entity_lookup['people']:
+                matched = self.entity_lookup['people'][normalized]
+                people.update(matched)
+                logger.debug(f"Token '{token}' matched people: {matched}")
+            
+            if normalized in self.entity_lookup['locations']:
+                matched = self.entity_lookup['locations'][normalized]
+                locations.update(matched)
+                logger.debug(f"Token '{token}' matched locations: {matched}")
+            
+            if normalized in self.entity_lookup['organizations']:
+                matched = self.entity_lookup['organizations'][normalized]
+                organizations.update(matched)
+                logger.debug(f"Token '{token}' matched organizations: {matched}")
+        
+        # Strategy 3: Substring matching for partial entity names
+        # This catches "epstein" → "Jeffrey Epstein", "maxwell" → "Ghislaine Maxwell"
+        all_entities = self.metadata_store.get_all_entities()
+        
+        for token in query_tokens:
+            if len(token) < 4:  # Too short for meaningful substring matching
+                continue
+            
+            if token in stopwords:
+                continue
+            
+            token_lower = token.lower()
+            
+            # Search for substring matches in people (limit search for performance)
+            for person in list(all_entities['people'])[:2000]:  # Top 2000 people
+                if token_lower in person.lower() and person not in people:
+                    people.add(person)
+                    logger.debug(f"Substring match: '{token}' → person '{person}'")
+                    break  # Found one match for this token, move on
+            
+            # Search for substring matches in locations (limit for performance)
+            for location in list(all_entities['locations'])[:1000]:  # Top 1000 locations
+                if token_lower in location.lower() and location not in locations:
+                    locations.add(location)
+                    logger.debug(f"Substring match: '{token}' → location '{location}'")
+                    break
+            
+            # Search for substring matches in organizations (limit for performance)
+            for org in list(all_entities['organizations'])[:1000]:  # Top 1000 orgs
+                if token_lower in org.lower() and org not in organizations:
+                    organizations.add(org)
+                    logger.debug(f"Substring match: '{token}' → organization '{org}'")
+                    break
+        
+        # Log final extracted entities
+        if people or locations or organizations:
+            logger.info(f"Extracted entities - People: {list(people)[:3]}, "
+                       f"Locations: {list(locations)[:3]}, "
+                       f"Organizations: {list(organizations)[:3]}")
+        else:
+            logger.info("No entities extracted from query")
+        
         return {
-            'people': metadata['people'] if metadata['people'] else None,
-            'locations': metadata['locations'] if metadata['locations'] else None,
-            'organizations': metadata['organizations'] if metadata['organizations'] else None
+            'people': list(people) if people else None,
+            'locations': list(locations) if locations else None,
+            'organizations': list(organizations) if organizations else None
         }
     
     def _filter_strict(self, 
