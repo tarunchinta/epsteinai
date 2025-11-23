@@ -27,17 +27,21 @@
 
 ### Problem
 
-spaCy extracts noisy entities from documents:
+spaCy has already extracted noisy entities from documents that need filtering:
 ```
-Bad Entities Extracted:
+Bad Entities Already Extracted:
 - People: '","textStyle":"bodyTextStyle', '& Shih', '06-04-2007'
 - Locations: '%%', '& Alcorta', 'Page 33'
 - Organizations: 'Dai-ichi Life 8750 JP Insurance'
 ```
 
+These entities exist in the current metadata store and need to be filtered out without re-running NER extraction.
+
 ### Solution 1: Post-Extraction Validation
 
 **File to Modify:** `src/metadata_extractor.py`
+
+**Note:** This validation filters already-extracted entities to remove noise. It does NOT re-run NER extraction on documents. The validation can be applied to existing metadata in-memory or during the extraction process.
 
 **Implementation:**
 
@@ -67,8 +71,12 @@ class MetadataExtractor:
         """
         Validate extracted entity quality
         
+        NOTE: This method filters already-extracted entities from spaCy NER.
+        It does NOT re-run entity extraction on the original document text.
+        Use this to clean noisy entities after extraction.
+        
         Args:
-            entity_text: The extracted entity string
+            entity_text: The extracted entity string (from spaCy)
             entity_type: Type (PERSON, ORG, GPE, LOC)
             
         Returns:
@@ -116,12 +124,17 @@ class MetadataExtractor:
         return True
     
     def _extract_people(self, doc) -> Set[str]:
-        """Extract PERSON entities with validation"""
+        """
+        Extract PERSON entities with validation
+        
+        Flow: spaCy extracts → validation filters → clean entities returned
+        (No re-extraction, just filtering what spaCy already found)
+        """
         people = set()
-        for ent in doc.ents:
+        for ent in doc.ents:  # doc.ents contains already-extracted entities
             if ent.label_ == "PERSON":
                 name = ent.text.strip()
-                if self._is_valid_entity(name, "PERSON"):
+                if self._is_valid_entity(name, "PERSON"):  # Filter out noise
                     people.add(name)
         return people
     
@@ -168,6 +181,8 @@ def test_entity_validation():
 - Reduces noisy entities by ~60-80%
 - Improves metadata filter precision
 - Better demo experience
+- Works on existing extracted metadata without re-running NER
+- Re-indexing only needed to persist cleaned entities to database
 
 ---
 
@@ -891,8 +906,10 @@ print(search_engine.metrics.report())
 
 ### Phase 1: Quick Wins (1-2 days)
 - [ ] Add entity validation to `metadata_extractor.py`
-- [ ] Test with re-indexing on sample documents
+- [ ] Apply validation to existing extracted entities (no re-extraction needed)
+- [ ] Test on sample metadata without re-indexing
 - [ ] Measure improvement in entity quality
+- [ ] (Optional) Re-index if you want to persist cleaned entities
 
 ### Phase 2: Fuzzy Matching (2-3 days)
 - [ ] Create `entity_matcher.py`
@@ -1064,16 +1081,18 @@ def mvp3_search(query: str, top_k: int = 10):
 To implement these improvements:
 
 ```bash
-# 1. Update entity extraction
-# Edit: src/metadata_extractor.py (add validation)
+# 1. Update entity extraction with validation
+# Edit: src/metadata_extractor.py (add _is_valid_entity() method)
+# NOTE: This filters already-extracted entities, does NOT re-run NER
 
-# 2. Re-index with clean entities
+# 2. (Optional) Re-index to persist cleaned entities to database
+# Only needed if you want to save filtered entities permanently
 python build_metadata_index.py
 
 # 3. Add fuzzy matching
 # Create: src/entity_matcher.py
 
-# 4. Update search engine
+# 4. Update search engine with flexible strategies
 # Edit: src/enhanced_search.py (add strategies)
 
 # 5. Test

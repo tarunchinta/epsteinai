@@ -7,6 +7,80 @@ from loguru import logger
 from src.sparse_search import BM25SearchEngine
 from src.metadata_store import MetadataStore
 from src.metadata_extractor import MetadataExtractor
+from src.entity_matcher import EntityMatcher
+
+
+class MetadataScorer:
+    """Calculate metadata-based relevance scores"""
+    
+    def __init__(self):
+        self.entity_matcher = EntityMatcher()
+        
+        # Scoring weights
+        self.weights = {
+            'person_match': 0.30,
+            'location_match': 0.20,
+            'org_match': 0.20,
+            'entity_density': 0.10,
+        }
+    
+    def calculate_metadata_score(self,
+                                 doc_metadata: Dict,
+                                 query_entities: Dict) -> float:
+        """
+        Calculate comprehensive metadata relevance score
+        
+        Args:
+            doc_metadata: Document metadata with entities
+            query_entities: Query entities (people, locations, organizations)
+        
+        Returns:
+            Score from 0.0 (no match) to 1.0 (perfect match)
+        """
+        total_score = 0.0
+        max_possible = 0.0
+        
+        # Person matching
+        if query_entities.get('people'):
+            max_possible += self.weights['person_match']
+            person_score = self.entity_matcher.match_score(
+                query_entities['people'],
+                doc_metadata['people']
+            )
+            total_score += person_score * self.weights['person_match']
+        
+        # Location matching
+        if query_entities.get('locations'):
+            max_possible += self.weights['location_match']
+            loc_score = self.entity_matcher.match_score(
+                query_entities['locations'],
+                doc_metadata['locations']
+            )
+            total_score += loc_score * self.weights['location_match']
+        
+        # Organization matching
+        if query_entities.get('organizations'):
+            max_possible += self.weights['org_match']
+            org_score = self.entity_matcher.match_score(
+                query_entities['organizations'],
+                doc_metadata['organizations']
+            )
+            total_score += org_score * self.weights['org_match']
+        
+        # Entity density (more entities = likely more relevant)
+        total_entities = (len(doc_metadata['people']) + 
+                         len(doc_metadata['locations']) +
+                         len(doc_metadata['organizations']))
+        max_possible += self.weights['entity_density']
+        
+        # Normalize (cap at 20 entities)
+        density_score = min(total_entities / 20, 1.0)
+        total_score += density_score * self.weights['entity_density']
+        
+        # Normalize to 0-1 range
+        if max_possible > 0:
+            return total_score / max_possible
+        return 0.0
 
 
 class EnhancedSearchEngine:
@@ -29,6 +103,8 @@ class EnhancedSearchEngine:
         self.bm25_engine = bm25_engine
         self.metadata_store = metadata_store
         self.metadata_extractor = MetadataExtractor()
+        self.entity_matcher = EntityMatcher()
+        self.metadata_scorer = MetadataScorer()
         
     def search(self,
                query: str,
@@ -100,6 +176,172 @@ class EnhancedSearchEngine:
         logger.info(f"Returning {len(final_results)} final results")
         
         return final_results
+    
+    def search_adaptive(self,
+                       query: str,
+                       top_k: int = 10,
+                       filter_strategy: str = 'adaptive',
+                       min_candidates: int = 50,
+                       max_candidates: int = 100,
+                       bm25_candidates: int = 500) -> List[Dict]:
+        """
+        Search with adaptive filtering strategy
+        
+        Args:
+            query: Search query
+            top_k: Final results to return
+            filter_strategy: 'strict', 'loose', 'adaptive', 'boost', or 'none'
+            min_candidates: Minimum docs to pass to next tier
+            max_candidates: Maximum docs to pass to next tier
+            bm25_candidates: Initial BM25 candidates to retrieve
+            
+        Returns:
+            Ranked search results
+        """
+        # TIER 1: BM25 Search
+        logger.info(f"Tier 1: BM25 search")
+        bm25_results = self.bm25_engine.search(query, top_k=bm25_candidates)
+        logger.info(f"BM25 found {len(bm25_results)} candidates")
+        
+        if not bm25_results:
+            return []
+        
+        # Extract entities from query
+        entities = self._extract_query_entities(query)
+        
+        if not entities or filter_strategy == 'none':
+            # No filtering, return BM25 results
+            return bm25_results[:top_k]
+        
+        # TIER 2: Apply filtering strategy
+        if filter_strategy == 'strict':
+            filtered = self._filter_strict(bm25_results, entities)
+        elif filter_strategy == 'loose':
+            filtered = self._filter_loose(bm25_results, entities)
+        elif filter_strategy == 'boost':
+            filtered = self._filter_with_boost(bm25_results, entities)
+        else:  # adaptive
+            filtered = self._filter_adaptive(
+                bm25_results, 
+                entities, 
+                min_candidates
+            )
+        
+        logger.info(f"Tier 2: Filtered to {len(filtered)} candidates (strategy: {filter_strategy})")
+        
+        # Ensure within range
+        if len(filtered) < min_candidates and filter_strategy != 'boost':
+            logger.warning(f"Only {len(filtered)} candidates, using top BM25 results")
+            return bm25_results[:min(max_candidates, len(bm25_results))]
+        
+        return filtered[:top_k]
+    
+    def _extract_query_entities(self, query: str) -> Dict:
+        """Extract entities from query with validation"""
+        metadata = self.metadata_extractor.extract_metadata(query, "query")
+        
+        return {
+            'people': metadata['people'] if metadata['people'] else None,
+            'locations': metadata['locations'] if metadata['locations'] else None,
+            'organizations': metadata['organizations'] if metadata['organizations'] else None
+        }
+    
+    def _filter_strict(self, 
+                       results: List[Dict], 
+                       entities: Dict) -> List[Dict]:
+        """
+        Strict AND filtering: ALL entities must match
+        Use for: Highly specific queries
+        """
+        doc_ids = [r['doc_id'] for r in results]
+        
+        filtered_ids = self.metadata_store.filter_documents_fuzzy(
+            doc_ids=doc_ids,
+            people=entities.get('people'),
+            locations=entities.get('locations'),
+            organizations=entities.get('organizations'),
+            match_mode='fuzzy'  # Use fuzzy matching
+        )
+        
+        return [r for r in results if r['doc_id'] in filtered_ids]
+    
+    def _filter_loose(self,
+                      results: List[Dict],
+                      entities: Dict) -> List[Dict]:
+        """
+        Loose OR filtering: ANY entity match counts
+        Use for: Broad exploration
+        """
+        doc_ids = [r['doc_id'] for r in results]
+        
+        filtered_ids = self.metadata_store.filter_documents_fuzzy(
+            doc_ids=doc_ids,
+            people=entities.get('people'),
+            locations=entities.get('locations'),
+            organizations=entities.get('organizations'),
+            match_mode='any'  # Use OR logic
+        )
+        
+        return [r for r in results if r['doc_id'] in filtered_ids]
+    
+    def _filter_with_boost(self,
+                          results: List[Dict],
+                          entities: Dict) -> List[Dict]:
+        """
+        Soft boosting: Don't filter out, just boost matching docs
+        Use for: MVP 3 (preserves candidates for dense search)
+        """
+        query_entities = {k: v for k, v in entities.items() if v}
+        
+        for result in results:
+            doc_metadata = self.metadata_store.get_metadata(result['doc_id'])
+            if not doc_metadata:
+                result['metadata_score'] = 0.0
+                continue
+            
+            # Calculate metadata match score
+            metadata_score = self.metadata_scorer.calculate_metadata_score(
+                doc_metadata,
+                query_entities
+            )
+            
+            # Store metadata score
+            result['metadata_score'] = metadata_score
+            
+            # Apply boost to BM25 score
+            result['original_score'] = result['score']
+            result['score'] = result['score'] * (1 + metadata_score)
+        
+        # Re-sort by boosted scores
+        results.sort(key=lambda x: x['score'], reverse=True)
+        
+        return results
+    
+    def _filter_adaptive(self,
+                        results: List[Dict],
+                        entities: Dict,
+                        min_candidates: int) -> List[Dict]:
+        """
+        Adaptive filtering: Try strict, fall back to loose if needed
+        Use for: General queries (default)
+        """
+        # Try strict first
+        strict_filtered = self._filter_strict(results, entities)
+        
+        if len(strict_filtered) >= min_candidates:
+            logger.info(f"Adaptive: Using strict filter ({len(strict_filtered)} docs)")
+            return strict_filtered
+        
+        # Fall back to loose
+        loose_filtered = self._filter_loose(results, entities)
+        
+        if len(loose_filtered) >= min_candidates:
+            logger.info(f"Adaptive: Using loose filter ({len(loose_filtered)} docs)")
+            return loose_filtered
+        
+        # Fall back to boost (no filtering)
+        logger.info(f"Adaptive: Using soft boost (preserving all {len(results)} docs)")
+        return self._filter_with_boost(results, entities)
     
     def search_with_auto_filters(self, query: str, top_k: int = 10) -> List[Dict]:
         """

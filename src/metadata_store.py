@@ -7,12 +7,13 @@ import json
 from typing import List, Dict, Optional
 from pathlib import Path
 from loguru import logger
+from src.entity_matcher import EntityMatcher
 
 
 class MetadataStore:
     """SQLite-based metadata storage"""
     
-    def __init__(self, db_path: str = "data/metadata.db"):
+    def __init__(self, db_path: str = "data/metadata.db", similarity_threshold: float = 0.85):
         """Initialize database connection"""
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -20,6 +21,9 @@ class MetadataStore:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row  # Return rows as dicts
         self._create_tables()
+        
+        # Initialize entity matcher for fuzzy matching
+        self.entity_matcher = EntityMatcher(similarity_threshold=similarity_threshold)
         
     def _create_tables(self):
         """Create database schema"""
@@ -284,6 +288,73 @@ class MetadataStore:
         entities['dates'] = [row['date_str'] for row in cursor.fetchall()]
         
         return entities
+    
+    def filter_documents_fuzzy(self,
+                               doc_ids: List[str],
+                               people: Optional[List[str]] = None,
+                               locations: Optional[List[str]] = None,
+                               organizations: Optional[List[str]] = None,
+                               match_mode: str = 'fuzzy') -> List[str]:
+        """
+        Filter documents with fuzzy entity matching
+        
+        Uses the EntityMatcher to find documents where entities match fuzzily
+        (e.g., "Maxwell" matches "Ghislaine Maxwell", "G. Maxwell", etc.)
+        
+        Args:
+            doc_ids: Document IDs to filter
+            people: People to match (fuzzy)
+            locations: Locations to match (fuzzy)
+            organizations: Organizations to match (fuzzy)
+            match_mode: 'exact' (use SQL), 'fuzzy' (use EntityMatcher), 'any' (OR logic)
+            
+        Returns:
+            Filtered list of document IDs
+        """
+        if not doc_ids:
+            return []
+        
+        # If exact mode, use the original filter_documents
+        if match_mode == 'exact':
+            return self.filter_documents(doc_ids, people, locations, organizations)
+        
+        matched_docs = []
+        
+        for doc_id in doc_ids:
+            doc_metadata = self.get_metadata(doc_id)
+            if not doc_metadata:
+                continue
+            
+            # Track whether document matches
+            matches = True
+            
+            if match_mode == 'fuzzy':
+                # AND logic: ALL criteria must match (if specified)
+                if people and not self.entity_matcher.match_any(people, doc_metadata['people']):
+                    matches = False
+                
+                if locations and not self.entity_matcher.match_any(locations, doc_metadata['locations']):
+                    matches = False
+                
+                if organizations and not self.entity_matcher.match_any(organizations, doc_metadata['organizations']):
+                    matches = False
+            
+            elif match_mode == 'any':
+                # OR logic: ANY criteria can match
+                matches = False
+                
+                if people and self.entity_matcher.match_any(people, doc_metadata['people']):
+                    matches = True
+                elif locations and self.entity_matcher.match_any(locations, doc_metadata['locations']):
+                    matches = True
+                elif organizations and self.entity_matcher.match_any(organizations, doc_metadata['organizations']):
+                    matches = True
+            
+            if matches:
+                matched_docs.append(doc_id)
+        
+        logger.debug(f"Fuzzy filter ({match_mode}): {len(doc_ids)} → {len(matched_docs)} docs")
+        return matched_docs
     
     def close(self):
         """Close database connection"""

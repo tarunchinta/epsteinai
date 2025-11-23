@@ -33,6 +33,19 @@ class MetadataExtractor:
             re.compile(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b'),  # July 12, 2015
         ]
         
+        # Validation patterns for entity quality filtering
+        self.invalid_patterns = [
+            r'[{}\[\]<>]',          # JSON/HTML brackets
+            r'^\d{2}-\d{2}-\d{4}',  # Dates (already extracted separately)
+            r'^[%&@#$]+',           # Special char prefixes
+            r'^\d+\s*$',            # Pure numbers
+            r'textStyle|layout|identifier',  # JSON keys
+        ]
+        
+        # Minimum quality thresholds
+        self.min_name_length = 3
+        self.max_name_length = 100
+        
     def extract_metadata(self, text: str, doc_id: str) -> Dict:
         """
         Extract all metadata from document
@@ -80,35 +93,94 @@ class MetadataExtractor:
         
         return metadata
     
+    def _is_valid_entity(self, entity_text: str, entity_type: str) -> bool:
+        """
+        Validate extracted entity quality
+        
+        NOTE: This method filters already-extracted entities from spaCy NER.
+        It does NOT re-run entity extraction on the original document text.
+        Use this to clean noisy entities after extraction.
+        
+        Args:
+            entity_text: The extracted entity string (from spaCy)
+            entity_type: Type (PERSON, ORG, GPE, LOC)
+            
+        Returns:
+            True if entity passes quality checks
+        """
+        text = entity_text.strip()
+        
+        # Length checks
+        if len(text) < self.min_name_length:
+            return False
+        if len(text) > self.max_name_length:
+            return False
+        
+        # Invalid pattern checks
+        for pattern in self.invalid_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return False
+        
+        # Type-specific validation
+        if entity_type == "PERSON":
+            # Person names shouldn't be all caps (likely acronyms/codes)
+            if text.isupper() and len(text) > 5:
+                return False
+            # Should contain at least one letter
+            if not any(c.isalpha() for c in text):
+                return False
+            # Common false positives
+            if text.lower() in ['the', 'and', 'page', 'chapter', 'section']:
+                return False
+        
+        elif entity_type in ["GPE", "LOC"]:
+            # Locations shouldn't start with special chars
+            if text[0] in ['&', '%', '#', '@']:
+                return False
+            # Likely noise if contains multiple special chars
+            if sum(1 for c in text if not c.isalnum() and c not in [' ', '-', '.']) > 2:
+                return False
+        
+        elif entity_type == "ORG":
+            # Organizations with excessive special chars are likely noise
+            special_char_ratio = sum(1 for c in text if not c.isalnum() and c != ' ') / len(text)
+            if special_char_ratio > 0.3:
+                return False
+        
+        return True
+    
     def _extract_people(self, doc) -> Set[str]:
-        """Extract PERSON entities"""
+        """
+        Extract PERSON entities with validation
+        
+        Flow: spaCy extracts → validation filters → clean entities returned
+        (No re-extraction, just filtering what spaCy already found)
+        """
         people = set()
         for ent in doc.ents:
             if ent.label_ == "PERSON":
-                # Clean up name
                 name = ent.text.strip()
-                # Filter out single letters and common false positives
-                if len(name) > 2 and not name.isupper():
+                if self._is_valid_entity(name, "PERSON"):
                     people.add(name)
         return people
     
     def _extract_organizations(self, doc) -> Set[str]:
-        """Extract ORG entities"""
+        """Extract ORG entities with validation"""
         orgs = set()
         for ent in doc.ents:
             if ent.label_ == "ORG":
                 org = ent.text.strip()
-                if len(org) > 1:
+                if self._is_valid_entity(org, "ORG"):
                     orgs.add(org)
         return orgs
     
     def _extract_locations(self, doc) -> Set[str]:
-        """Extract GPE (geo-political entity) and LOC entities"""
+        """Extract GPE and LOC entities with validation"""
         locations = set()
         for ent in doc.ents:
             if ent.label_ in ["GPE", "LOC"]:
                 loc = ent.text.strip()
-                if len(loc) > 1:
+                if self._is_valid_entity(loc, ent.label_):
                     locations.add(loc)
         return locations
     
