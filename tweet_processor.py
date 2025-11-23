@@ -6,57 +6,44 @@ This module processes tweet text and generates appropriate responses.
 from typing import Optional
 
 
-def generate_response(tweet_text: str) -> str:
+def generate_response(tweet_text: str, author_username: str) -> str:
     """
-    Takes in tweet text and outputs the message that is supposed to be returned to the user.
+    Takes in tweet text and outputs the complete reply message for the user.
     
     Args:
-        tweet_text (str): The text content of the tweet (with @mentions removed)
+        tweet_text (str): The text content of the tweet (raw text)
+        author_username (str): The username of the person who mentioned the bot
     
     Returns:
-        str: The response message to be sent back to the user
+        str: The complete reply message to be sent back (includes @mention)
     
     Example:
-        >>> response = generate_response("What happened in 2019?")
+        >>> response = generate_response("@bot What happened in 2019?", "john_doe")
         >>> print(response)
-        "Based on the documents..."
+        "@john_doe What happened in 2019?"
     """
     # Clean and normalize the input text
     query = tweet_text.strip()
     
-    # Handle empty queries
-    if not query:
-        return "I didn't receive any question. Please ask me something about the documents!"
-    
-    # Extract text and remove bot mention
+    # Extract text and remove all @mentions
     words = query.split()
     filtered_words = [word for word in words if not word.startswith('@')]
-    echo_text = ' '.join(filtered_words).strip()
+    clean_text = ' '.join(filtered_words).strip()
     
-    # Create reply
-    if echo_text:
-        return echo_text
-    else:
-        return f"You didn't say anything for me to echo!"
+    # Handle empty queries (only @mentions, no actual content)
+    if not clean_text:
+        return f"@{author_username} You didn't say anything for me to echo!"
+    
+    # Create reply with @mention
+    reply_text = f"@{author_username} {clean_text}"
+    
+    return reply_text
 
     # TODO: Integrate with RAG system when implemented
-    # For now, return a placeholder response
     # This will be replaced with actual RAG query processing
-    
-    # Placeholder implementation
-    # In the future, this will:
+    # Future implementation will:
     # 1. Process the query through the RAG pipeline
     # 2. Search documents using BM25 + semantic search
     # 3. Generate a response based on retrieved context
     # 4. Format the response for Twitter (280 char limit)
-    
-    response = f"Processing your query: '{query}'. RAG system integration coming soon!"
-    
-    # Ensure response fits Twitter's character limit (280 characters)
-    # Leave room for @username mention (typically ~15 chars)
-    max_length = 265
-    if len(response) > max_length:
-        response = response[:max_length-3] + "..."
-    
-    return response
 

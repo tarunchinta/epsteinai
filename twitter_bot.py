@@ -6,6 +6,7 @@ import time
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from tweet_processor import generate_response
 
 # Load environment variables from .env file
 load_dotenv()
@@ -60,26 +61,15 @@ def check_mentions():
                              if user.id == tweet.author_id), None)
                 author_username = author.username if author else "unknown"
                 
-                # Extract text and remove bot mention
-                tweet_text = tweet.text
-                # Remove @mentions from the text
-                words = tweet_text.split()
-                filtered_words = [word for word in words if not word.startswith('@')]
-                echo_text = ' '.join(filtered_words).strip()
-                
-                # Create reply
-                if echo_text:
-                    reply_text = f"@{author_username} {echo_text}"
-                else:
-                    reply_text = f"@{author_username} You didn't say anything for me to echo!"
+                # Generate complete reply (includes @mention)
+                reply_text = generate_response(tweet.text, author_username)
                 
                 # Post reply
                 client.create_tweet(
                     text=reply_text,
                     in_reply_to_tweet_id=tweet.id
                 )
-                
-                print(f"[{datetime.now()}] Replied to @{author_username}: {echo_text}")
+                print(f"[{datetime.now()}] Replied to @{author_username}: {reply_text}")
                 
         else:
             print(f"[{datetime.now()}] No new mentions")
