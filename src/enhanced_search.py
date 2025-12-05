@@ -227,12 +227,12 @@ class EnhancedSearchEngine:
         return final_results
     
     def search_adaptive(self,
-                       query: str,
-                       top_k: int = 10,
-                       filter_strategy: str = 'adaptive',
-                       min_candidates: int = 50,
-                       max_candidates: int = 100,
-                       bm25_candidates: int = 500) -> List[Dict]:
+                      query: str,
+                      top_k: int = 10,
+                      filter_strategy: str = 'boost',
+                      min_candidates: int = 50,
+                      max_candidates: int = 100,
+                      bm25_candidates: int = 500) -> List[Dict]:
         """
         Search with adaptive filtering strategy
         
@@ -278,11 +278,7 @@ class EnhancedSearchEngine:
         
         logger.info(f"Tier 2: Filtered to {len(filtered)} candidates (strategy: {filter_strategy})")
         
-        # Ensure within range
-        if len(filtered) < min_candidates and filter_strategy != 'boost':
-            logger.warning(f"Only {len(filtered)} candidates, using top BM25 results")
-            return bm25_results[:min(max_candidates, len(bm25_results))]
-        
+        # Return filtered results (no fallback - trust the metadata filtering)
         return filtered[:top_k]
     
     def _extract_query_entities(self, query: str) -> Dict:
